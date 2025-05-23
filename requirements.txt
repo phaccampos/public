@@ -1,0 +1,4 @@
+APScheduler
+Flask
+SQLAlchemy
+python-dotenv
