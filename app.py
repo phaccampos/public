@@ -6,6 +6,7 @@ from sqlalchemy import create_engine # Adicionada conforme solicitado na tarefa
 from flask import Flask, render_template_string, redirect, url_for, flash # Adicionado redirect, url_for, flash
 import threading # Para rodar o Flask em uma thread separada
 import os # Para getenv e flask_app.secret_key
+from datetime import datetime
 
 from email_notifications import send_email # Adicionado para notificações por email
 
@@ -135,16 +136,38 @@ def index():
 @flask_app.route('/job/run/<job_id>')
 def run_job(job_id):
     try:
-        logging.info(f"Tentando executar manualmente o job: {job_id}")
-        scheduler.run_job(job_id, jobstore='default') # Especificar jobstore pode ser necessário
-        flash(f"Tarefa '{job_id}' disparada para execução imediata com sucesso!", 'success')
-        logging.info(f"Job {job_id} disparado manualmente com sucesso.")
+        original_job = scheduler.get_job(job_id, jobstore='default') # Busca o job original
+        
+        if original_job:
+            # Gera um ID único para esta execução manual
+            manual_run_id = f"{job_id}_manual_{os.urandom(4).hex()}"
+            
+            logging.info(f"Tentando executar manualmente o job '{job_id}' como um novo job temporário '{manual_run_id}'.")
+            
+            # Adiciona um NOVO job baseado no original, mas para rodar imediatamente
+            scheduler.add_job(
+                func=original_job.func,       # A mesma função do job original
+                args=original_job.args,       # Os mesmos argumentos
+                kwargs=original_job.kwargs,   # Os mesmos argumentos chave-valor
+                trigger='date',               # Para rodar apenas uma vez
+                run_date=datetime.now(scheduler.timezone), # Data/hora atual, usando o timezone do scheduler
+                id=manual_run_id,             # ID único para esta execução
+                name=f"{original_job.name} (Execução Manual)", # Nome descritivo
+                jobstore='default',
+                replace_existing=False        # Não substitui nenhum job existente
+            )
+            
+            flash(f"Tarefa '{job_id}' (como '{manual_run_id}') foi agendada para execução imediata com sucesso!", 'success')
+            logging.info(f"Job '{job_id}' (como '{manual_run_id}') agendado para execução manual imediata.")
+        else:
+            flash(f"Tarefa '{job_id}' não encontrada no agendador.", 'error')
+            logging.warning(f"Tentativa de executar manualmente o job '{job_id}', mas ele não foi encontrado.")
+            
     except Exception as e:
-        # APScheduler pode levantar JobLookupError se o job não for encontrado,
-        # ou outras exceções se o job falhar ao ser iniciado.
         flash(f"Erro ao tentar executar a tarefa '{job_id}': {str(e)}", 'error')
-        logging.error(f"Erro ao disparar manualmente o job {job_id}: {e}", exc_info=True)
-    return redirect(url_for('index')) # Redireciona de volta para a página principal
+        logging.error(f"Erro ao disparar manualmente o job '{job_id}': {e}", exc_info=True)
+        
+    return redirect(url_for('index'))
 
 def run_flask_app():
     # host='0.0.0.0' para tornar acessível na rede local
