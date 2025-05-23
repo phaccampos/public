@@ -3,10 +3,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR, JobExecutionEvent # Adicionado para monitoramento
 from sqlalchemy import create_engine # Adicionada conforme solicitado na tarefa
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, redirect, url_for, flash # Adicionado redirect, url_for, flash
 import threading # Para rodar o Flask em uma thread separada
-import os # Para getenv
-from tasks import example_task_success, example_task_failure
+import os # Para getenv e flask_app.secret_key
 
 from email_notifications import send_email # Adicionado para notificações por email
 
@@ -17,6 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 ENABLE_EMAIL_NOTIFICATIONS = os.getenv('ENABLE_EMAIL_NOTIFICATIONS', 'False').lower() == 'true'
 
 flask_app = Flask(__name__)
+flask_app.secret_key = os.urandom(24) # Necessário para flash messages
 
 DATABASE_URL = "sqlite:///jobs.sqlite"
 
@@ -53,22 +53,18 @@ def job_listener_error(event: JobExecutionEvent):
 scheduler.add_listener(job_listener_success, EVENT_JOB_EXECUTED)
 scheduler.add_listener(job_listener_error, EVENT_JOB_ERROR)
 
-def add_job_to_scheduler(job_id, func_object, trigger_args, replace_existing=True):
+def add_job_to_scheduler(job_id, func_path, trigger_args, replace_existing=True):
+    logging.info(f"Adicionando/atualizando job: {job_id}, func: {func_path}, trigger: {trigger_args}")
     try:
-        # Atualize o log para usar o nome da função do objeto, se disponível
-        func_name = func_object.__name__ if hasattr(func_object, '__name__') else str(func_object)
-        logging.info(f"Adicionando/atualizando job: {job_id}, func: {func_name}, trigger: {trigger_args}")
-        
         scheduler.add_job(
-            func_object,
+            func_path,
             id=job_id,
             replace_existing=replace_existing,
-            **trigger_args
+            **trigger_args  # Desempacota os argumentos do trigger aqui
         )
         logging.info(f"Job {job_id} adicionado/atualizado com sucesso.")
     except Exception as e:
-        func_name_for_error = func_object.__name__ if hasattr(func_object, '__name__') else str(func_object)
-        logging.error(f"Erro ao adicionar/atualizar job {job_id} para função {func_name_for_error}: {e}", exc_info=True)
+        logging.error(f"Erro ao adicionar/atualizar job {job_id}: {e}")
 
 def remove_job_from_scheduler(job_id):
     logging.info(f"Tentando remover job: {job_id}")
@@ -98,21 +94,57 @@ def list_scheduled_jobs():
 
 @flask_app.route('/')
 def index():
-    jobs = list_scheduled_jobs() # Esta função já retorna uma lista de dicts com info dos jobs
+    jobs = list_scheduled_jobs()
     
-    # Construir uma string HTML simples
-    html = "<h1>Tarefas Agendadas</h1>"
+    # Construir HTML com mensagens flash e botão de execução manual
+    html = """
+    <html>
+        <head>
+            <title>Tarefas Agendadas</title>
+            <style>
+                .alert { padding: 15px; margin-bottom: 20px; border: 1px solid transparent; border-radius: 4px; }
+                .alert-success { color: #155724; background-color: #d4edda; border-color: #c3e6cb; }
+                .alert-error { color: #721c24; background-color: #f8d7da; border-color: #f5c6cb; }
+            </style>
+        </head>
+        <body>
+            <h1>Tarefas Agendadas</h1>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+              {% if messages %}
+                {% for category, message in messages %}
+                  <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+              {% endif %}
+            {% endwith %}
+    """
     if not jobs:
         html += "<p>Nenhuma tarefa agendada.</p>"
     else:
-        html += "<table border='1'><tr><th>ID</th><th>Função</th><th>Próxima Execução</th></tr>"
-        for job in jobs: # Assumindo que list_scheduled_jobs() retorna uma lista de dicionários
+        html += "<table border='1'><tr><th>ID</th><th>Função</th><th>Próxima Execução</th><th>Ações</th></tr>"
+        for job in jobs:
             job_id = job.get('id', 'N/A')
-            job_name = job.get('name', 'N/A') 
+            job_name = job.get('name', 'N/A')
             next_run = job.get('next_run_time', 'N/A')
-            html += f"<tr><td>{job_id}</td><td>{job_name}</td><td>{next_run}</td></tr>"
+            # Adicionar link/botão para execução manual
+            run_link = f"<a href='{url_for('run_job', job_id=job_id)}'>Executar Agora</a>"
+            html += f"<tr><td>{job_id}</td><td>{job_name}</td><td>{next_run}</td><td>{run_link}</td></tr>"
         html += "</table>"
+    html += "</body></html>"
     return render_template_string(html)
+
+@flask_app.route('/job/run/<job_id>')
+def run_job(job_id):
+    try:
+        logging.info(f"Tentando executar manualmente o job: {job_id}")
+        scheduler.run_job(job_id, jobstore='default') # Especificar jobstore pode ser necessário
+        flash(f"Tarefa '{job_id}' disparada para execução imediata com sucesso!", 'success')
+        logging.info(f"Job {job_id} disparado manualmente com sucesso.")
+    except Exception as e:
+        # APScheduler pode levantar JobLookupError se o job não for encontrado,
+        # ou outras exceções se o job falhar ao ser iniciado.
+        flash(f"Erro ao tentar executar a tarefa '{job_id}': {str(e)}", 'error')
+        logging.error(f"Erro ao disparar manualmente o job {job_id}: {e}", exc_info=True)
+    return redirect(url_for('index')) # Redireciona de volta para a página principal
 
 def run_flask_app():
     # host='0.0.0.0' para tornar acessível na rede local
@@ -128,12 +160,12 @@ if __name__ == '__main__':
     # Agendar tarefas de exemplo (como já está)
     add_job_to_scheduler(
         job_id="task_success_1",
-        func_object=example_task_success,
+        func_path="tasks.example_task_success",
         trigger_args={'trigger': 'interval', 'seconds': 10}
     )
     add_job_to_scheduler(
         job_id="task_failure_1",
-        func_object=example_task_failure,
+        func_path="tasks.example_task_failure",
         trigger_args={'trigger': 'interval', 'seconds': 15}
     )
 
