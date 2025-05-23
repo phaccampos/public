@@ -6,6 +6,7 @@ from sqlalchemy import create_engine # Adicionada conforme solicitado na tarefa
 from flask import Flask, render_template_string
 import threading # Para rodar o Flask em uma thread separada
 import os # Para getenv
+from tasks import example_task_success, example_task_failure
 
 from email_notifications import send_email # Adicionado para notificações por email
 
@@ -52,18 +53,22 @@ def job_listener_error(event: JobExecutionEvent):
 scheduler.add_listener(job_listener_success, EVENT_JOB_EXECUTED)
 scheduler.add_listener(job_listener_error, EVENT_JOB_ERROR)
 
-def add_job_to_scheduler(job_id, func_path, trigger_args, replace_existing=True):
-    logging.info(f"Adicionando/atualizando job: {job_id}, func: {func_path}, trigger: {trigger_args}")
+def add_job_to_scheduler(job_id, func_object, trigger_args, replace_existing=True):
     try:
+        # Atualize o log para usar o nome da função do objeto, se disponível
+        func_name = func_object.__name__ if hasattr(func_object, '__name__') else str(func_object)
+        logging.info(f"Adicionando/atualizando job: {job_id}, func: {func_name}, trigger: {trigger_args}")
+        
         scheduler.add_job(
-            func_path,
+            func_object,
             id=job_id,
             replace_existing=replace_existing,
-            **trigger_args  # Desempacota os argumentos do trigger aqui
+            **trigger_args
         )
         logging.info(f"Job {job_id} adicionado/atualizado com sucesso.")
     except Exception as e:
-        logging.error(f"Erro ao adicionar/atualizar job {job_id}: {e}")
+        func_name_for_error = func_object.__name__ if hasattr(func_object, '__name__') else str(func_object)
+        logging.error(f"Erro ao adicionar/atualizar job {job_id} para função {func_name_for_error}: {e}", exc_info=True)
 
 def remove_job_from_scheduler(job_id):
     logging.info(f"Tentando remover job: {job_id}")
@@ -123,12 +128,12 @@ if __name__ == '__main__':
     # Agendar tarefas de exemplo (como já está)
     add_job_to_scheduler(
         job_id="task_success_1",
-        func_path="tasks.example_task_success",
+        func_object=example_task_success,
         trigger_args={'trigger': 'interval', 'seconds': 10}
     )
     add_job_to_scheduler(
         job_id="task_failure_1",
-        func_path="tasks.example_task_failure",
+        func_object=example_task_failure,
         trigger_args={'trigger': 'interval', 'seconds': 15}
     )
 
